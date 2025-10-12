@@ -1,0 +1,17 @@
+name: ising-solvers
+channels:
+  - pytorch
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.9
+  - pytorch>=2.0
+  - numpy>=1.21
+  - matplotlib>=3.5
+  - jupyter
+  - notebook
+  - ipykernel
+  - scipy
+  - pip
+  - pip:
+    - torch-audio  # optional for additional PyTorch features
