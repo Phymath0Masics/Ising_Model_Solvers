@@ -1,12 +1,15 @@
 """
-Ising Model Solvers: DOCH and ADOCH Algorithms
+Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
 
-This module implements the DOCH (Difference Of Convex Hamiltonian) based Ising Solver
-and ADOCH (Accelerated Difference Of Convex Hamiltonian) based Ising Solver.
+This module implements multiple solvers for the Ising model:
+    - DOCH (Difference Of Convex Hamiltonian)
+    - ADOCH (Accelerated DOCH)
+    - SA (Simulated Annealing)
+    - BSB (Ballistic Spin/Bifurcation machine)
+    - SimCIM (Simulated Coherent Ising Machine)
+    - SIS (Spring-damping-based Ising Machine)
 
-Classes:
-    DOCH:  DOCH algorithm implementation
-    ADOCH: Accelerated DOCH algorithm with momentum and restart
+All solvers expose a solve(...) method returning (energies, times, final_spins).
 """
 
 # import necessary libraries
@@ -182,6 +185,7 @@ class ADOCH:
         return energies, times, torch.sign(x)
 
 
+
 def compute_matrix_norms(J_mat):
     """
     Compute matrix norms needed for DOCH/ADOCH algorithms.
@@ -208,6 +212,194 @@ def compute_matrix_norms(J_mat):
         )
     
     return J_mat_1_norm, j_mat_2_norm
+
+
+def compute_J_bar(J_mat: torch.Tensor) -> torch.Tensor:
+    """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
+
+    Args:
+        J_mat: Coupling matrix (n x n) with zero diagonal preferred.
+
+    Returns:
+        torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
+    """
+    n = J_mat.shape[0]
+    n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
+    denom = n_t * (n_t - 1.0) * (10 - 1.0)**2
+    return torch.sqrt(torch.sum(J_mat.float()**2) / denom)
+
+
+
+class SA:
+    """Simulated Annealing for the Ising model.
+
+    solve(J_mat, x0, beta0, runtime) -> (energies, times, spins)
+    """
+
+    def __init__(self, device=None):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def solve(self, J_mat, x0, beta0: float, runtime: float):
+        N = J_mat.shape[0]
+        device = self.device
+
+        spin = torch.sign(x0.to(device))
+        E = -0.5 * spin @ J_mat.to(device) @ spin
+
+        E_list = [float(E.item())]
+        T_list = [0.0]
+
+        start = time.time()
+        t = 0.0
+        it = 0
+        while t < runtime:
+            elapsed = t
+            # Log temperature schedule; 
+            beta = beta0 * torch.log(torch.tensor(1.0 + elapsed / max(runtime, 1e-8),
+                                                  device=device, dtype=torch.float32))
+
+            v = torch.randint(0, N, (1,), device=device).item()
+            spin_new = spin.clone()
+            spin_new[v] *= -1
+
+            delta_E = -0.5 * spin_new @ J_mat.to(device) @ spin_new - E
+            # delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
+            
+            if delta_E < 0 or torch.rand(1, device=device, dtype=torch.float32).item() < torch.exp(-beta * delta_E).item():
+                spin = spin_new
+                E = E + delta_E
+
+            t = time.time() - start
+            E_list.append(float(E.item()))
+            T_list.append(t)
+            it += 1
+            # if it % 1000 == 0:
+            #     print(f'SA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+
+        return E_list, T_list, spin
+
+
+class BSB:
+    """Ballistic spin/bifurcation machine dynamics for the Ising model.
+
+    solve(J_mat, x0, a0, c0, dt, runtime) -> (energies, times, spins)
+    """
+
+    def __init__(self, device=None):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def solve(self, J_mat, x0, a0: float, c0: float, dt: float, runtime: float):
+        N = J_mat.shape[0]
+        device = self.device
+        x = torch.sign(x0.to(device)).flatten()
+        y = torch.zeros(N, device=device, dtype=torch.float32)
+
+        E_list = []
+        T_list = []
+
+        start = time.time()
+        t = 0.0
+        it = 0
+        while t < runtime:
+            a_t = a0 * (time.time() - start) / max(runtime, 1e-8)
+            y = y + (-(a0 - a_t) * x + c0 * (J_mat @ x)) * dt
+            x = x + a0 * y * dt
+            x = torch.clamp(x, -1.0, 1.0)
+            y = torch.where((x == 1.0) | (x == -1.0), torch.zeros_like(y), y)
+
+            ss = torch.sign(x)
+            energy = -0.5 * (ss @ J_mat @ ss)
+            t = time.time() - start
+            E_list.append(float(energy.item()))
+            T_list.append(t)
+            it += 1
+            # if it % 1000 == 0:
+            #     print(f'BSB: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+
+        return E_list, T_list, ss
+
+
+class SimCIM:
+    """Simulated coherent Ising machine dynamics.
+
+    solve(J_mat, x0, A, a0, c0, dt, runtime) -> (energies, times, spins)
+    """
+
+    def __init__(self, device=None):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def solve(self, J_mat, x0, A: float, a0: float, c0: float, dt: float, runtime: float):
+        device = self.device
+        x = torch.sign(x0.to(device)).flatten()
+
+        E_list = []
+        T_list = []
+        start = time.time()
+        t = 0.0
+        it = 0
+        sqrt_dt = torch.sqrt(torch.tensor(dt, device=device, dtype=torch.float32))
+
+        while t < runtime:
+            a_t = a0 * (time.time() - start) / max(runtime, 1e-8)
+            noise = A * torch.randn_like(x, device=device) * sqrt_dt
+            x = x + (-(a0 - a_t) * x + c0 * (J_mat @ torch.sign(x))) * dt + noise
+            x = torch.clamp(x, -1.0, 1.0)
+            ss = torch.sign(x)
+
+            energy = -0.5 * (ss @ J_mat @ ss)
+            t = time.time() - start
+            E_list.append(float(energy.item()))
+            T_list.append(t)
+            it += 1
+            # if it % 1000 == 0:
+            #     print(f'SimCIM: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+
+        return E_list, T_list, ss
+
+
+class SIS:
+    """Spring-damping-based Ising machine dynamics.
+
+    solve(J_mat, x0, m, k, zeta0, delta_t, runtime) -> (energies, times, spins)
+    """
+
+    def __init__(self, device=None):
+        self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    def solve(self, J_mat, x0, m: float, k: float, zeta0: float, delta_t: float, runtime: float):
+        device = self.device
+        N = J_mat.shape[0]
+        q = torch.zeros(N, device=device, dtype=torch.float32)
+        p = 0.0005 * x0.to(device)
+
+        current_zeta = 0.8 * zeta0
+        zeta_growth_rate = (10.0 * zeta0 - 0.8 * zeta0) / max(runtime, 1e-8)
+
+        E_list = []
+        T_list = []
+        start = time.time()
+        t = 0.0
+        it = 0
+
+        sqrt_2 = torch.sqrt(torch.tensor(2.0, device=device, dtype=torch.float32))
+        while t < runtime:
+            q = q + delta_t * p / m
+            p = p - delta_t * k * q + 0.5 * current_zeta * delta_t * (J_mat @ q)
+            q = torch.clamp(q, -sqrt_2, sqrt_2)
+            p = torch.clamp(p, -2.0, 2.0)
+
+            spin = torch.sign(q)
+            energy = -0.5 * (spin @ J_mat @ spin)
+            t = time.time() - start
+            E_list.append(float(energy.item()))
+            T_list.append(t)
+            it += 1
+            # if it % 1000 == 0:
+            #     print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+
+            current_zeta = 0.8 * zeta0 + zeta_growth_rate * t
+
+        return E_list, T_list, spin
 
 
 
@@ -263,4 +455,49 @@ def generate_random_ising(model, n, p=100.0, device=None):
         J_mat = J_mat * sparsity_mask.float()
     
     return J_mat
+
+
+
+
+def compute_matrix_norms(J_mat):
+    """
+    Compute matrix norms needed for DOCH/ADOCH algorithms.
+    
+    Args:
+        J_mat: Coupling matrix
+        
+    Returns:
+        tuple: (matrix_1_norm, matrix_2_norm)
+    """
+    n = J_mat.shape[0]
+    
+    # 1-norm (maximum absolute column sum)
+    J_mat_1_norm = torch.max(torch.abs(J_mat).sum(dim=0))
+    
+    # 2-norm calculation
+    if n <= 1000:
+        # Exact computation for small matrices
+        j_mat_2_norm = torch.linalg.norm(J_mat, ord=2)
+    else:
+        # Wigner semicircle law approximation for large matrices
+        j_mat_2_norm = 2 * math.sqrt(n) * torch.sqrt(
+            torch.sum(J_mat**2)/(n*(n-1)) - (torch.sum(J_mat)/(n*(n-1)))**2
+        )
+    
+    return J_mat_1_norm, j_mat_2_norm
+
+
+def compute_j_bar(J_mat: torch.Tensor) -> torch.Tensor:
+    """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
+
+    Args:
+        J_mat: Coupling matrix (n x n) with zero diagonal preferred.
+
+    Returns:
+        torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
+    """
+    n = J_mat.shape[0]
+    n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
+    denom = n_t * (n_t - 1.0)
+    return torch.sqrt(torch.sum(J_mat.float()**2) / denom)
 
