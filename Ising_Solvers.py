@@ -8,15 +8,24 @@ This module implements multiple solvers for the Ising model:
     - BSB (Ballistic Spin/Bifurcation machine)
     - SimCIM (Simulated Coherent Ising Machine)
     - SIS (Spring-damping-based Ising Machine)
+    - Utility functions for generating small and large random Ising matrices and computing norms.
 
 All solvers expose a solve(...) method returning (energies, times, final_spins).
 """
 
 # import necessary libraries
-import torch
+import os
 import time
 import math
+import gc
+import warnings
+import numpy as np
+import torch
+import scipy.sparse as sp
+from tqdm import tqdm
+import psutil
 
+warnings.filterwarnings("ignore", category=DeprecationWarning)
 
 class DOCH:
     """
@@ -67,7 +76,7 @@ class DOCH:
             
             # Step 3: Compute energy and track progress
             spins = torch.sign(x)
-            energy = -0.5 * (spins @ J_mat @ spins)
+            energy = -0.5 * (spins @ (J_mat @ spins))
             
             energies.append(energy.item())
             times.append(time.time() - start_time)
@@ -173,7 +182,7 @@ class ADOCH:
             
             # Compute energy and track progress
             spins = torch.sign(x)
-            energy = -0.5 * (spins @ J_mat @ spins)
+            energy = -0.5 * (spins @ (J_mat @ spins))
             
             elapsed_time = time.time() - start_time
             energies.append(energy.item())
@@ -183,51 +192,6 @@ class ADOCH:
             k += 1
         
         return energies, times, torch.sign(x)
-
-
-
-def compute_matrix_norms(J_mat):
-    """
-    Compute matrix norms needed for DOCH/ADOCH algorithms.
-    
-    Args:
-        J_mat: Coupling matrix
-        
-    Returns:
-        tuple: (matrix_1_norm, matrix_2_norm)
-    """
-    n = J_mat.shape[0]
-    
-    # 1-norm (maximum absolute column sum)
-    J_mat_1_norm = torch.max(torch.abs(J_mat).sum(dim=0))
-    
-    # 2-norm calculation
-    if n <= 1000:
-        # Exact computation for small matrices
-        j_mat_2_norm = torch.linalg.norm(J_mat, ord=2)
-    else:
-        # Wigner semicircle law approximation for large matrices
-        j_mat_2_norm = 2 * math.sqrt(n) * torch.sqrt(
-            torch.sum(J_mat**2)/(n*(n-1)) - (torch.sum(J_mat)/(n*(n-1)))**2
-        )
-    
-    return J_mat_1_norm, j_mat_2_norm
-
-
-def compute_J_bar(J_mat: torch.Tensor) -> torch.Tensor:
-    """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
-
-    Args:
-        J_mat: Coupling matrix (n x n) with zero diagonal preferred.
-
-    Returns:
-        torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
-    """
-    n = J_mat.shape[0]
-    n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
-    denom = n_t * (n_t - 1.0) * (10 - 1.0)**2
-    return torch.sqrt(torch.sum(J_mat.float()**2) / denom)
-
 
 
 class SA:
@@ -243,8 +207,8 @@ class SA:
         N = J_mat.shape[0]
         device = self.device
 
-        spin = torch.sign(x0.to(device))
-        E = -0.5 * spin @ J_mat.to(device) @ spin
+        spin = torch.sign(x0)
+        E = -0.5 * spin @ (J_mat @ spin)
 
         E_list = [float(E.item())]
         T_list = [0.0]
@@ -262,7 +226,7 @@ class SA:
             spin_new = spin.clone()
             spin_new[v] *= -1
 
-            delta_E = -0.5 * spin_new @ J_mat.to(device) @ spin_new - E
+            delta_E = -0.5 * spin_new @ (J_mat @ spin_new) - E
             # delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
             
             if delta_E < 0 or torch.rand(1, device=device, dtype=torch.float32).item() < torch.exp(-beta * delta_E).item():
@@ -291,7 +255,7 @@ class BSB:
     def solve(self, J_mat, x0, a0: float, c0: float, dt: float, runtime: float):
         N = J_mat.shape[0]
         device = self.device
-        x = torch.sign(x0.to(device)).flatten()
+        x = torch.sign(x0).flatten()
         y = torch.zeros(N, device=device, dtype=torch.float32)
 
         E_list = []
@@ -308,7 +272,7 @@ class BSB:
             y = torch.where((x == 1.0) | (x == -1.0), torch.zeros_like(y), y)
 
             ss = torch.sign(x)
-            energy = -0.5 * (ss @ J_mat @ ss)
+            energy = -0.5 * (ss @ (J_mat @ ss))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
@@ -330,7 +294,7 @@ class SimCIM:
 
     def solve(self, J_mat, x0, A: float, a0: float, c0: float, dt: float, runtime: float):
         device = self.device
-        x = torch.sign(x0.to(device)).flatten()
+        x = torch.sign(x0).flatten()
 
         E_list = []
         T_list = []
@@ -346,7 +310,7 @@ class SimCIM:
             x = torch.clamp(x, -1.0, 1.0)
             ss = torch.sign(x)
 
-            energy = -0.5 * (ss @ J_mat @ ss)
+            energy = -0.5 * (ss @ (J_mat @ ss))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
@@ -370,7 +334,7 @@ class SIS:
         device = self.device
         N = J_mat.shape[0]
         q = torch.zeros(N, device=device, dtype=torch.float32)
-        p = 0.0005 * x0.to(device)
+        p = 0.0005 * x0
 
         current_zeta = 0.8 * zeta0
         zeta_growth_rate = (10.0 * zeta0 - 0.8 * zeta0) / max(runtime, 1e-8)
@@ -389,7 +353,7 @@ class SIS:
             p = torch.clamp(p, -2.0, 2.0)
 
             spin = torch.sign(q)
-            energy = -0.5 * (spin @ J_mat @ spin)
+            energy = -0.5 * (spin @ (J_mat @ spin))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
@@ -402,6 +366,8 @@ class SIS:
         return E_list, T_list, spin
 
 
+
+# Utility functions for small Ising matrices
 
 def generate_random_ising(model, n, p=100.0, device=None):
     """
@@ -456,9 +422,6 @@ def generate_random_ising(model, n, p=100.0, device=None):
     
     return J_mat
 
-
-
-
 def compute_matrix_norms(J_mat):
     """
     Compute matrix norms needed for DOCH/ADOCH algorithms.
@@ -486,7 +449,6 @@ def compute_matrix_norms(J_mat):
     
     return J_mat_1_norm, j_mat_2_norm
 
-
 def compute_j_bar(J_mat: torch.Tensor) -> torch.Tensor:
     """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
 
@@ -500,4 +462,358 @@ def compute_j_bar(J_mat: torch.Tensor) -> torch.Tensor:
     n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
     denom = n_t * (n_t - 1.0)
     return torch.sqrt(torch.sum(J_mat.float()**2) / denom)
+
+
+
+# Utility functions for large Ising matrices
+
+def generate_sparse_matrix_chunk(start_row, end_row, n, sparsity, seed=None, max_memory_percent=80):
+    """Generate a chunk of the sparse matrix directly in CSR format."""
+    # Set random seed for reproducibility if provided
+    if seed is not None:
+        np.random.seed(seed + start_row)
+    
+    # Calculate expected number of non-zero elements per row (excluding diagonal)
+    nnz_per_row = max(1, math.ceil((1 - sparsity) * (n - 1)))
+    
+    # Arrays for CSR format
+    indptr = [0]  # Row pointer array
+    indices = []  # Column indices
+    data = []     # Values
+    
+    # Process each row in this chunk with memory monitoring
+    current_nnz = 0
+    for i in range(start_row, end_row):
+        # Check memory usage periodically
+        if (i - start_row) % 100 == 0:
+            mem_usage = psutil.virtual_memory().percent
+            if mem_usage > max_memory_percent:
+                print(f"\nWarning: Memory usage at {mem_usage}%. Reducing non-zeros for remaining rows.")
+                # Dynamically reduce nnz_per_row if memory is getting tight
+                nnz_per_row = max(1, nnz_per_row // 2)
+        
+        # Generate column indices for this row (excluding diagonal)
+        if n <= 10**5:  # For smaller matrices, we can do this more directly
+            cols = np.random.choice(
+                np.concatenate([np.arange(0, i), np.arange(i+1, n)]),
+                size=min(nnz_per_row, n-1),
+                replace=False
+            )
+        else:
+            # For large matrices, we need to be more memory-efficient in sampling
+            # Strategy: Generate a small random subset and then sample from that
+            sample_size = min(10*nnz_per_row, n-1)  # Sample pool size
+            
+            # Generate random indices without creating large arrays
+            cols = set()
+            attempts = 0
+            max_attempts = sample_size * 10  # Limit attempts to prevent infinite loops
+            
+            while len(cols) < min(nnz_per_row, n-1) and attempts < max_attempts:
+                col = np.random.randint(0, n)
+                if col != i:  # Skip diagonal
+                    cols.add(col)
+                attempts += 1
+            
+            cols = np.array(list(cols))
+        
+        # Sort column indices (required for CSR format)
+        cols.sort()
+        
+        # Generate random values (9-bit signed integers)
+        vals = np.random.randint(-(2**9)+1, (2**9)-1, size=len(cols), dtype=np.int16)
+        
+        # Add to CSR arrays
+        indices.extend(cols)
+        data.extend(vals)
+        current_nnz += len(cols)
+        indptr.append(current_nnz)
+        
+        # print progress with row number and memory usage
+        if (i - start_row) % 1000 == 0 and i > start_row:
+            mem = psutil.virtual_memory()
+            print(f"\rRow {i}/{end_row-1} - Memory: {mem.percent}% used, {mem.available/1e9:.1f}GB free",
+                  end="", flush=True)
+            
+            # Force garbage collection periodically
+            gc.collect()
+    
+    # Convert lists to arrays
+    indptr_arr = np.array(indptr, dtype=np.int32)
+    indices_arr = np.array(indices, dtype=np.int32)
+    data_arr = np.array(data, dtype=np.int16)
+    
+    return indptr_arr, indices_arr, data_arr
+
+def create_symmetric_from_half(upper_half, n):
+    """Create a symmetric matrix from the upper triangular half."""
+    print("Creating symmetric matrix from upper triangular half...")
+    
+    # Get the transpose (lower triangular part)
+    lower_half = upper_half.transpose()
+    
+    # Add the two halves
+    result = upper_half + lower_half
+    
+    return result
+
+def generate_sparse_matrix(n=10**6, sparsity=0.99, num_chunks=32, seed=42, max_memory_percent=80):
+    """
+    Generate a large sparse symmetric matrix with the specified properties using CSR format.
+    """
+    print(f"Generating {n}x{n} sparse matrix with {sparsity*100:.7f}% sparsity")
+    print(f"Using CSR format for memory efficiency")
+    
+    # Calculate chunk sizes
+    chunk_size = n // num_chunks
+    chunk_size = max(1, chunk_size)  # Ensure chunk size is at least 1
+    
+    # Initialize empty arrays for CSR format
+    all_indptr = [0]
+    all_indices = []
+    all_data = []
+    
+    # Track memory usage
+    peak_memory = 0
+    start_time = time.time()
+    
+    # Process chunks to build the upper triangular part
+    for i in range(0, n, chunk_size):
+        chunk_start = i
+        chunk_end = min(i + chunk_size, n)
+        
+        print(f"\nProcessing chunk {chunk_start}-{chunk_end} ({chunk_end-chunk_start} rows)")
+        
+        # Generate this chunk in CSR format
+        indptr, indices, data = generate_sparse_matrix_chunk(
+            chunk_start, chunk_end, n, sparsity, 
+            seed=seed+i if seed else None,
+            max_memory_percent=max_memory_percent
+        )
+        
+        # Adjust the indptr values to account for the current total
+        if len(all_indices) > 0:
+            last_nnz = all_indptr[-1]
+            indptr = indptr[1:] + last_nnz  # Skip the first element (0) and add the offset
+        else:
+            indptr = indptr[1:]  # Skip just the first element
+            
+        # Append to the main arrays
+        all_indptr.extend(indptr)
+        all_indices.extend(indices)
+        all_data.extend(data)
+        
+        # Clear chunk data to free memory
+        indptr = indices = data = None
+        gc.collect()
+        
+        # Log memory usage
+        mem = psutil.virtual_memory()
+        if mem.percent > peak_memory:
+            peak_memory = mem.percent
+        
+        elapsed = time.time() - start_time
+        remaining_chunks = (n - chunk_end) / chunk_size
+        est_remaining = remaining_chunks * (elapsed / ((chunk_start + chunk_size) / chunk_size))
+        
+        print(f"Memory: {mem.percent}% used, {mem.available/1e9:.1f}GB free")
+        print(f"Progress: {100*chunk_end/n:.1f}% done, ~{est_remaining/60:.1f} minutes remaining")
+    
+    # Create the upper triangular matrix
+    print("Constructing final upper triangular matrix...")
+    upper_half = sp.csr_matrix((all_data, all_indices, all_indptr), shape=(n, n), dtype=np.int16)
+    
+    # Clear the arrays to free memory
+    all_indptr = all_indices = all_data = None
+    gc.collect()
+    
+    # Create symmetric matrix
+    matrix = create_symmetric_from_half(upper_half, n)
+    
+    # Report statistics
+    print(f"Generated matrix with shape {matrix.shape} and {matrix.nnz} non-zero elements")
+    print(f"Generation time: {time.time() - start_time:.2f} seconds")
+    print(f"Peak memory usage: {peak_memory}%")
+    
+    return matrix
+
+def save_to_compressed_format(matrix, filename="sparse_matrix.npz"):
+    """Save the sparse matrix in a compressed format."""
+    print(f"Saving matrix to {filename}")
+    start_time = time.time()
+    sp.save_npz(filename, matrix, compressed=True)
+    save_time = time.time() - start_time
+    file_size = os.path.getsize(filename) / (1024**3)
+    print(f"File size: {file_size:.2f} GB, Save time: {save_time:.2f} seconds")
+
+def build_large_matrix(n, sparsity):
+    # System information
+    print(f"CPU Memory: {psutil.virtual_memory().total / (1024**3):.2f} GB")
+    print(f"CPU Cores: {os.cpu_count()}")
+    
+    # Calculate memory requirements
+    total_elements = n**2
+    nonzero_elements = int(total_elements * (1 - sparsity))
+    estimated_memory_csr = ((nonzero_elements * (4 + 2)) + (n + 1) * 4) / (1024**3)  # CSR format in GB
+    
+    print(f"Matrix size: {n} x {n} = {total_elements} elements")
+    print(f"Non-zero elements: ~{nonzero_elements} ({(1-sparsity)*100:.10f}%)")
+    print(f"Estimated memory (CSR format): ~{estimated_memory_csr:.2f} GB")
+    
+    # Determine optimal chunk size based on available memory
+    available_memory = psutil.virtual_memory().available / (1024**3)  # Available memory in GB
+    
+    # Adaptive chunk sizing
+    # We want each chunk to use no more than 5% of available memory
+    max_chunk_memory = available_memory * 0.05  # GB
+    row_memory = estimated_memory_csr / n  # GB per row
+    chunk_size = int(max_chunk_memory / row_memory)
+    
+    # Ensure reasonable chunk size
+    chunk_size = min(max(chunk_size, 1000), 10000)
+    num_chunks = math.ceil(n / chunk_size)
+    
+    print(f"Available memory: {available_memory:.2f} GB")
+    print(f"Using {num_chunks} chunks with ~{chunk_size} rows per chunk")
+    
+    # Set memory threshold for adaptive reduction
+    max_memory_percent = 90
+    print(f"Will reduce non-zeros if memory usage exceeds {max_memory_percent}%")
+    
+    # Generate the matrix
+    start_time = time.time()
+    matrix = generate_sparse_matrix(
+        n=n, 
+        sparsity=sparsity, 
+        num_chunks=num_chunks, 
+        seed=42, 
+        max_memory_percent=max_memory_percent
+    )
+    generation_time = time.time() - start_time
+    
+    # Report memory usage of final matrix
+    matrix_memory = (matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes) / (1024**3)
+    print(f"Matrix memory usage: {matrix_memory:.2f} GB")
+    print(f"Total generation time: {generation_time:.2f} seconds")
+    
+    # # Save the matrix
+    # if not test_mode:
+    #     save_to_compressed_format(matrix, filename="sparse_M6.npz")
+    
+    print("Process completed successfully")
+    return matrix
+
+def compute_J_bar(J_mat: torch.Tensor) -> torch.Tensor:
+    """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
+
+    Args:
+        J_mat: Coupling matrix (n x n) with zero diagonal preferred.
+
+    Returns:
+        torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
+    """
+    n = J_mat.shape[0]
+    n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
+    denom = n_t * (n_t - 1.0) * (10 - 1.0)**2
+    return torch.sqrt(torch.sum(J_mat.float()**2) / denom)
+
+def calculate_parameters_with_progress(J_mat_coo, n=1000000, memory_efficient=True, chunk_size=50000):
+    """
+    Wrapper function that calculates parameters with progress bars
+    
+    Args:
+        J_mat_coo: scipy.sparse.coo_matrix - The sparse matrix in COO format
+        n: int - Matrix dimension (assuming square matrix)
+        memory_efficient: bool - Whether to use the memory-efficient approach
+        chunk_size: int - Size of chunks to process at once (for memory-efficient approach)
+    
+    Returns:
+        dict: Dictionary containing the calculated parameters
+    """
+    print(f"Processing {J_mat_coo.nnz} non-zero elements in {n}x{n} matrix")
+    
+    if memory_efficient:
+        print("Using memory-efficient approach")
+        # Calculate j_mat_2_norm
+        print("Calculating j_mat_2_norm...")
+        squared_sum = 0
+        data_chunks = np.array_split(J_mat_coo.data, max(1, len(J_mat_coo.data) // 10**6))
+        for chunk in tqdm(data_chunks, desc="Summing squares", unit="chunk"):
+            squared_sum += np.sum(chunk.astype(np.float32) ** 2)
+        j_mat_2_norm = 2 * np.sqrt(n) * np.sqrt(squared_sum / (n * (n - 1)))
+        
+        # Calculate J_mat_1_norm
+        print("Converting to CSC format for column operations...")
+        J_mat_csc = J_mat_coo.tocsc()
+        
+        print("Calculating J_mat_1_norm...")
+        max_col_sum = 0
+        
+        for start_col in tqdm(range(0, n, chunk_size), desc="Processing columns", unit="chunk"):
+            end_col = min(start_col + chunk_size, n)
+            
+            # Extract a subset of columns
+            J_sub = J_mat_csc[:, start_col:end_col]
+            
+            # Calculate column sums for this chunk
+            col_sums = np.array(abs(J_sub).sum(axis=0)).flatten()
+            
+            # Update max column sum - FIX: Check if col_sums is not empty
+            if col_sums.size > 0:
+                chunk_max = np.max(col_sums)
+                max_col_sum = max(max_col_sum, chunk_max)
+        
+        # Calculate j_bar
+        print("Calculating j_bar in chunks...")
+        j_bar = j_mat_2_norm / (2 * np.sqrt(n) * (10 - 1.0))
+        
+        return {
+            "j_bar": j_bar,
+            "J_mat_1_norm": max_col_sum, 
+            "j_mat_2_norm": j_mat_2_norm
+        }
+    else:
+        print("Using PyTorch-based approach")
+        # Convert scipy COO matrix to PyTorch sparse tensor
+        print("Converting to PyTorch sparse tensor...")
+        indices = torch.LongTensor(np.vstack((J_mat_coo.row, J_mat_coo.col)))
+        
+        # Process values in chunks to avoid memory issues
+        values_chunks = np.array_split(J_mat_coo.data, max(1, len(J_mat_coo.data) // 10000000))
+        values = []
+        
+        for chunk in tqdm(values_chunks, desc="Processing values", unit="chunk"):
+            values.append(torch.tensor(chunk, dtype=torch.float32))
+        
+        values = torch.cat(values)
+        
+        # Create PyTorch sparse tensor
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        print(f"Using device: {device}")
+        J_mat = torch.sparse_coo_tensor(indices, values, size=(n, n), device=device)
+        
+        # Calculate j_mat_2_norm
+        print("Calculating j_mat_2_norm...")
+        J_mat_coalesced = J_mat.coalesce()
+        squared_sum = torch.sum(J_mat_coalesced.values().float() ** 2).item()
+        j_mat_2_norm = 2 * np.sqrt(n) * np.sqrt(squared_sum / (n * (n - 1)))
+        
+        # Calculate J_mat_1_norm
+        print("Calculating J_mat_1_norm...")
+        J_abs = J_mat.abs()
+        print("Computing column sums...")
+        col_sums = torch.sparse.sum(J_abs, dim=0).to_dense()
+        J_mat_1_norm = torch.max(col_sums).item()
+        print(f"J_mat_1_norm = {J_mat_1_norm}")
+
+        # Calculate j_bar
+        print("Calculating j_bar...")
+        j_bar = j_mat_2_norm / (2 * np.sqrt(n) * (10 - 1.0))
+        
+        return {
+            "j_bar": j_bar,
+            "J_mat_1_norm": J_mat_1_norm,
+            "j_mat_2_norm": j_mat_2_norm
+        }
+
 
