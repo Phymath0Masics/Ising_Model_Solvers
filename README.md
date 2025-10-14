@@ -121,7 +121,7 @@ adoch = ADOCH(device)
 E_DOCH, T_DOCH, s_DOCH = doch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
 E_ADOCH, T_ADOCH, s_ADOCH = adoch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
 
-# Optional others
+# Other solvers
 sa = SA(device)
 bsb = BSB(device)
 cim = SimCIM(device)
@@ -132,7 +132,7 @@ E_BSB, T_BSB, s_BSB = bsb.solve(J_mat, x0, a0=1.0, c0=c0, dt=1e-2, runtime=5)
 E_CIM, T_CIM, s_CIM = cim.solve(J_mat, x0, A=0.1, a0=1.0, c0=c0, dt=1e-2, runtime=5)
 E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=5)
 
-# Main convergence plot
+# Plot results
 plt.figure()
 plt.plot(T_DOCH, E_DOCH, label='DOCH', color='green', linewidth=2, alpha=0.8)
 plt.plot(T_ADOCH, E_ADOCH, label='ADOCH', color='red', linewidth=2, alpha=0.8)
@@ -179,5 +179,6 @@ Ensure the channels include `nvidia` and that your PyTorch build matches the CUD
 
 ## License
 This repository is provided as-is for research and educational use. See header comments for implementation details.
+
 
 
