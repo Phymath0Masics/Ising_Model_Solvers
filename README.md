@@ -110,29 +110,38 @@ from Ising_Solvers import *
 import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-n = 2000
-J_mat = generate_random_ising('fc', n, p=100.0, device=device)
+n = 2000  # number of spins
+
+# Generate K2000 Ising model data
+J_mat = np.random.randn(n, n).astype(np.float32)
+J_mat = torch.from_numpy(J_mat).to(device)
+J_mat = (J_mat + J_mat.T) / 2  # Make symmetric
+J_mat = torch.where(J_mat >= 0, torch.tensor(1.0, device=device), torch.tensor(-1.0, device=device))  # Binarize to +1/-1
+J_mat.fill_diagonal_(0)  # No self-coupling
+
+# Compute required norms
 J_mat_1_norm, j_mat_2_norm = compute_matrix_norms(J_mat)
-x0 = torch.randn(n, device=device)
 j_bar = compute_J_bar(J_mat)
+x0 = torch.randn(n, device=device)
+max_runtime = 1  # seconds
 
 doch = DOCH(device)
 adoch = ADOCH(device)
-E_DOCH, T_DOCH, s_DOCH = doch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
-E_ADOCH, T_ADOCH, s_ADOCH = adoch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
+E_DOCH, T_DOCH, s_DOCH = doch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=max_runtime)
+E_ADOCH, T_ADOCH, s_ADOCH = adoch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=max_runtime)
 
-# Other solvers
+# Optional others
 sa = SA(device)
 bsb = BSB(device)
 cim = SimCIM(device)
 sis = SIS(device)
 c0 = 0.5/(j_bar*np.sqrt(J_mat.shape[0]))
-E_SA, T_SA, s_SA = sa.solve(J_mat, x0, beta0=1.0, runtime=5)
-E_BSB, T_BSB, s_BSB = bsb.solve(J_mat, x0, a0=1.0, c0=c0, dt=1e-2, runtime=5)
-E_CIM, T_CIM, s_CIM = cim.solve(J_mat, x0, A=0.1, a0=1.0, c0=c0, dt=1e-2, runtime=5)
-E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=5)
+E_SA, T_SA, s_SA = sa.solve(J_mat, x0, beta0=1.0, runtime=max_runtime)
+E_BSB, T_BSB, s_BSB = bsb.solve(J_mat, x0, a0=1.0, c0=c0, dt=1e-2, runtime=max_runtime)
+E_CIM, T_CIM, s_CIM = cim.solve(J_mat, x0, A=0.1, a0=1.0, c0=c0, dt=1e-2, runtime=max_runtime)
+E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=max_runtime)
 
-# Plot results
+# Main convergence plot
 plt.figure()
 plt.plot(T_DOCH, E_DOCH, label='DOCH', color='green', linewidth=2, alpha=0.8)
 plt.plot(T_ADOCH, E_ADOCH, label='ADOCH', color='red', linewidth=2, alpha=0.8)
@@ -179,6 +188,7 @@ Ensure the channels include `nvidia` and that your PyTorch build matches the CUD
 
 ## License
 This repository is provided as-is for research and educational use. See header comments for implementation details.
+
 
 
 
