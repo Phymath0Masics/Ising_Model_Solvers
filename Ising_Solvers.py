@@ -237,8 +237,7 @@ class SA:
             E_list.append(float(E.item()))
             T_list.append(t)
             it += 1
-            # if it % 1000 == 0:
-            #     print(f'SA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, spin
 
@@ -277,8 +276,7 @@ class BSB:
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            # if it % 1000 == 0:
-            #     print(f'BSB: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'BSB: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, ss
 
@@ -315,8 +313,7 @@ class SimCIM:
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            # if it % 1000 == 0:
-            #     print(f'SimCIM: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SimCIM: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, ss
 
@@ -358,8 +355,7 @@ class SIS:
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            # if it % 1000 == 0:
-            #     print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
             current_zeta = 0.8 * zeta0 + zeta_growth_rate * t
 
