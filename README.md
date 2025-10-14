@@ -1,8 +1,8 @@
 # Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
 
 This project provides multiple algorithms to solve the Ising model by approximating the lowest energy state:
-- DOCH — Difference Of Convex Hamiltonian based Ising Solver
-- ADOCH — Accelerated DOCH
+- DOCH — Difference Of Convex Hamiltonian based Ising Solver (our)
+- ADOCH — Accelerated DOCH (our)
 - SA — Simulated Annealing
 - BSB — Ballistic Simulated Bifurcation machine
 - SimCIM — Simulated Coherent Ising Machine
@@ -179,4 +179,5 @@ Ensure the channels include `nvidia` and that your PyTorch build matches the CUD
 
 ## License
 This repository is provided as-is for research and educational use. See header comments for implementation details.
+
 
