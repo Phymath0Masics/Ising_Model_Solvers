@@ -1,5 +1,6 @@
 name: ising-solvers
 channels:
+  - nvidia  # Optional: enable if you plan to use CUDA via pytorch-cuda
   - pytorch
   - conda-forge
   - defaults
@@ -12,6 +13,14 @@ dependencies:
   - notebook
   - ipykernel
   - scipy
+  - tqdm
+  - psutil
   - pip
   - pip:
-    - torch-audio  # optional for additional PyTorch features
+    - torchaudio  # optional for additional PyTorch features (CPU-only by default)
+
+# Notes for GPU acceleration (Windows):
+# - If you have a compatible NVIDIA GPU and drivers, you can install CUDA-enabled PyTorch by adding
+#   the following package to the dependencies list (uncomment the next line) and keeping the 'nvidia' channel above.
+# - pytorch-cuda=12.1
+#   Then reinstall PyTorch to match, or create the environment fresh.
