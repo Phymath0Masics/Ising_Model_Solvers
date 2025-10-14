@@ -106,22 +106,19 @@ Tip: If you only need the small case, skip Step 2.2 cells to save time and memor
 
 ## Minimal code example (small dense case)
 ```python
-from Ising_Solvers import (
-    DOCH, ADOCH, SA, BSB, SimCIM, SIS,
-    compute_matrix_norms, generate_random_ising, compute_j_bar
-)
-import torch
+from Ising_Solvers import *
+import matplotlib.pyplot as plt
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-n = 1000
-J_mat = generate_random_ising('sk', n, p=50.0, device=device)
+n = 2000
+J_mat = generate_random_ising('fc', n, p=100.0, device=device)
 J_mat_1_norm, j_mat_2_norm = compute_matrix_norms(J_mat)
 x0 = torch.randn(n, device=device)
-j_bar = compute_j_bar(J_mat)
+j_bar = compute_J_bar(J_mat)
 
 doch = DOCH(device)
 adoch = ADOCH(device)
-E_DOCH, T_DOCH, s_DOCH = doch.solve(J_mat, x0, eta=1.0, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
+E_DOCH, T_DOCH, s_DOCH = doch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
 E_ADOCH, T_ADOCH, s_ADOCH = adoch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2_norm, J_mat_1_norm=J_mat_1_norm, runtime=5)
 
 # Optional others
@@ -129,11 +126,31 @@ sa = SA(device)
 bsb = BSB(device)
 cim = SimCIM(device)
 sis = SIS(device)
-c0 = float(4.5/(j_bar*torch.sqrt(torch.tensor(float(n), device=J_mat.device))))
+c0 = 0.5/(j_bar*np.sqrt(J_mat.shape[0]))
 E_SA, T_SA, s_SA = sa.solve(J_mat, x0, beta0=1.0, runtime=5)
 E_BSB, T_BSB, s_BSB = bsb.solve(J_mat, x0, a0=1.0, c0=c0, dt=1e-2, runtime=5)
 E_CIM, T_CIM, s_CIM = cim.solve(J_mat, x0, A=0.1, a0=1.0, c0=c0, dt=1e-2, runtime=5)
-E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=2e-1, runtime=5)
+E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=5)
+
+# Main convergence plot
+plt.figure()
+plt.plot(T_DOCH, E_DOCH, label='DOCH', color='green', linewidth=2, alpha=0.8)
+plt.plot(T_ADOCH, E_ADOCH, label='ADOCH', color='red', linewidth=2, alpha=0.8)
+if 'T_SA' in globals():
+    plt.plot(T_SA, E_SA, label='SA', color='y', linewidth=1.5, alpha=0.8)
+if 'T_BSB' in globals():
+    plt.plot(T_BSB, E_BSB, label='BSB', color='m', linewidth=1.5, alpha=0.8)
+if 'T_CIM' in globals():
+    plt.plot(T_CIM, E_CIM, label='SimCIM', color='orange', linewidth=1.5, alpha=0.8)
+if 'T_SIS' in globals():
+    plt.plot(T_SIS, E_SIS, label='SIS', color='c', linewidth=1.5, alpha=0.8)
+
+plt.xscale('log')
+plt.grid(True, which="both", ls="--", alpha=0.7)
+plt.xlabel('Time (seconds)')
+plt.ylabel('Ising Energy')
+plt.title(f'Benchmarking Ising model solvers ({n} spins)')
+plt.legend(fontsize=10)
 ```
 
 
@@ -162,3 +179,4 @@ Ensure the channels include `nvidia` and that your PyTorch build matches the CUD
 
 ## License
 This repository is provided as-is for research and educational use. See header comments for implementation details.
+
