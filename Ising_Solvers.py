@@ -19,6 +19,8 @@ import time
 import math
 import gc
 import warnings
+from typing import cast
+
 import numpy as np
 import torch
 import scipy.sparse as sp
@@ -26,6 +28,63 @@ from tqdm import tqdm
 import psutil
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
+
+
+def _ensure_device_tensor(value, device, dtype=torch.float32, require_dense=True):
+    """Convert value to a torch tensor on the requested device.
+
+    Args:
+        value: torch.Tensor, numpy.ndarray, scipy sparse matrix, or scalar-like.
+        device: Target torch device.
+        dtype: Desired floating dtype. Ignored for boolean tensors.
+        require_dense: If True, convert sparse tensors to dense representation.
+
+    Returns:
+        torch.Tensor on the requested device.
+    """
+    if torch.is_tensor(value):
+        tensor = value.to(device)
+        if dtype and tensor.dtype != dtype and tensor.is_floating_point():
+            tensor = tensor.to(dtype)
+        if require_dense and (tensor.is_sparse or getattr(tensor, "is_sparse_csr", False)):
+            tensor = tensor.to_dense()
+        return tensor
+
+    if isinstance(value, np.ndarray):
+        tensor = torch.from_numpy(value)
+        tensor = tensor.to(device=device)
+        if dtype and tensor.is_floating_point():
+            tensor = tensor.to(dtype)
+        return tensor if not (require_dense and tensor.is_sparse) else tensor.to_dense()
+
+    if sp.issparse(value):
+        coo = value.tocoo()
+        indices = torch.tensor(np.vstack((coo.row, coo.col)), device=device, dtype=torch.long)
+        data_dtype = dtype if dtype is not None else torch.float32
+        values = torch.tensor(coo.data, device=device, dtype=data_dtype)
+        sparse_tensor = torch.sparse_coo_tensor(indices, values, size=coo.shape, device=device)
+        return sparse_tensor.to_dense() if require_dense else sparse_tensor.coalesce()
+
+    tensor = torch.tensor(value, device=device)
+    if dtype and tensor.is_floating_point():
+        tensor = tensor.to(dtype)
+    return tensor
+
+
+def _as_scalar_tensor(value, device, dtype=torch.float32):
+    """Return a 0-dim tensor on device with dtype."""
+    if torch.is_tensor(value):
+        return value.to(device=device, dtype=dtype)
+    return torch.tensor(value, device=device, dtype=dtype)
+
+
+def _matvec(J_mat, x):
+    """Matrix-vector product supporting dense or sparse J_mat."""
+    if J_mat.is_sparse or getattr(J_mat, "is_sparse_csr", False) or getattr(J_mat, "is_sparse_csc", False):
+        if J_mat.layout != torch.sparse_coo:
+            J_mat = J_mat.to_sparse()
+        return torch.sparse.mm(J_mat, x.unsqueeze(-1)).squeeze(-1)
+    return J_mat @ x
 
 class DOCH:
     """
@@ -55,28 +114,35 @@ class DOCH:
         Returns:
             (energies, times, final_spins)
         """
+        device = self.device
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x = _ensure_device_tensor(x0, device=device, dtype=torch.float32).flatten()
+
+        eta_t = _as_scalar_tensor(eta, device=device)
+        j_mat_2_t = _as_scalar_tensor(j_mat_2_norm, device=device)
+        J_mat_1_t = _as_scalar_tensor(J_mat_1_norm, device=device)
+
         n = J_mat.shape[0]
-        n_tensor = torch.tensor(n, device=self.device, dtype=torch.float32)
+        n_tensor = torch.tensor(n, device=device, dtype=torch.float32)
         
         # Step 1: Initialize parameters
-        alpha = eta * j_mat_2_norm
-        beta = n_tensor * torch.sqrt(n_tensor) * (alpha + J_mat_1_norm)
+        alpha = eta_t * j_mat_2_t
+        beta = n_tensor * torch.sqrt(n_tensor) * (alpha + J_mat_1_t)
         
         energies = []
         times = []
-        x = x0.clone()
         
         start_time = time.time()
         iterations = 0
         
         while time.time() - start_time < runtime:
             # Step 2: DOCH update rule
-            J_x = J_mat @ x
+            J_x = _matvec(J_mat, x)
             x = torch.sign(alpha * x + J_x) * (torch.abs((alpha * x + J_x) / beta))**(1/3)
             
             # Step 3: Compute energy and track progress
             spins = torch.sign(x)
-            energy = -0.5 * (spins @ (J_mat @ spins))
+            energy = -0.5 * (spins @ _matvec(J_mat, spins))
             
             energies.append(energy.item())
             times.append(time.time() - start_time)
@@ -117,16 +183,23 @@ class ADOCH:
         Returns:
             (energies, times, final_spins)
         """
+        device = self.device
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x = _ensure_device_tensor(x0, device=device, dtype=torch.float32).flatten()
+
+        eta_t = _as_scalar_tensor(eta, device=device)
+        j_mat_2_t = _as_scalar_tensor(j_mat_2_norm, device=device)
+        J_mat_1_t = _as_scalar_tensor(J_mat_1_norm, device=device)
+
         n = J_mat.shape[0]
-        n_tensor = torch.tensor(n, device=self.device, dtype=torch.float32)
+        n_tensor = torch.tensor(n, device=device, dtype=torch.float32)
         
         # Step 1: Initialize parameters
-        alpha = eta * j_mat_2_norm
-        beta = n_tensor * torch.sqrt(n_tensor) * (alpha + J_mat_1_norm)
+        alpha = eta_t * j_mat_2_t
+        beta = n_tensor * torch.sqrt(n_tensor) * (alpha + J_mat_1_t)
         inv_beta = 1.0 / beta
-        
-        x = x0.clone()
-        z = x0.clone()
+
+        z = x.clone()
         t_val = 1.0
         
         energies = []
@@ -135,7 +208,7 @@ class ADOCH:
         
         def compute_objective(x_input):
             """Objective function: G(x) - H(x)"""
-            quadratic = 0.5 * x_input @ (alpha * x_input + (J_mat @ x_input))
+            quadratic = 0.5 * x_input @ (alpha * x_input + _matvec(J_mat, x_input))
             quartic = 0.25 * beta * torch.sum(x_input**4)
             return quartic - quadratic
         
@@ -174,7 +247,7 @@ class ADOCH:
             
             # Step 5: T iterations of DOCH update
             for _ in range(T):
-                numerator = alpha * x + (J_mat @ x)
+                numerator = alpha * x + _matvec(J_mat, x)
                 x = torch.sign(numerator) * torch.abs(numerator * inv_beta) ** (1/3)
             
             x_history.append(x.clone())
@@ -182,7 +255,7 @@ class ADOCH:
             
             # Compute energy and track progress
             spins = torch.sign(x)
-            energy = -0.5 * (spins @ (J_mat @ spins))
+            energy = -0.5 * (spins @ _matvec(J_mat, spins))
             
             elapsed_time = time.time() - start_time
             energies.append(energy.item())
@@ -204,11 +277,14 @@ class SA:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def solve(self, J_mat, x0, beta0: float, runtime: float):
-        N = J_mat.shape[0]
         device = self.device
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x0_t = _ensure_device_tensor(x0, device=device, dtype=torch.float32).flatten()
+        beta0_t = _as_scalar_tensor(beta0, device=device)
 
-        spin = torch.sign(x0)
-        E = -0.5 * spin @ (J_mat @ spin)
+        N = J_mat.shape[0]
+        spin = torch.sign(x0_t)
+        E = -0.5 * spin @ _matvec(J_mat, spin)
 
         E_list = [float(E.item())]
         T_list = [0.0]
@@ -219,17 +295,18 @@ class SA:
         while t < runtime:
             elapsed = t
             # Log temperature schedule; 
-            beta = beta0 * torch.log(torch.tensor(1.0 + elapsed / max(runtime, 1e-8),
+            beta = beta0_t * torch.log(torch.tensor(1.0 + elapsed / max(runtime, 1e-8),
                                                   device=device, dtype=torch.float32))
 
-            v = torch.randint(0, N, (1,), device=device).item()
+            v = int(torch.randint(0, N, (1,), device=device, dtype=torch.long).item())
             spin_new = spin.clone()
             spin_new[v] *= -1
 
-            delta_E = -0.5 * spin_new @ (J_mat @ spin_new) - E
+            delta_E = -0.5 * spin_new @ _matvec(J_mat, spin_new) - E
             # delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
-            
-            if delta_E < 0 or torch.rand(1, device=device, dtype=torch.float32).item() < torch.exp(-beta * delta_E).item():
+
+            accept_prob = torch.exp(-beta * delta_E)
+            if delta_E.item() < 0 or torch.rand(1, device=device, dtype=accept_prob.dtype) < accept_prob:
                 spin = spin_new
                 E = E + delta_E
 
@@ -237,7 +314,7 @@ class SA:
             E_list.append(float(E.item()))
             T_list.append(t)
             it += 1
-            print(f'SA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, spin
 
@@ -252,9 +329,15 @@ class BSB:
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     def solve(self, J_mat, x0, a0: float, c0: float, dt: float, runtime: float):
-        N = J_mat.shape[0]
         device = self.device
-        x = torch.sign(x0).flatten()
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x0_t = _ensure_device_tensor(x0, device=device, dtype=torch.float32).flatten()
+        a0_t = _as_scalar_tensor(a0, device=device)
+        c0_t = _as_scalar_tensor(c0, device=device)
+        dt_t = _as_scalar_tensor(dt, device=device)
+
+        N = J_mat.shape[0]
+        x = torch.sign(x0_t).flatten()
         y = torch.zeros(N, device=device, dtype=torch.float32)
 
         E_list = []
@@ -264,19 +347,19 @@ class BSB:
         t = 0.0
         it = 0
         while t < runtime:
-            a_t = a0 * (time.time() - start) / max(runtime, 1e-8)
-            y = y + (-(a0 - a_t) * x + c0 * (J_mat @ x)) * dt
-            x = x + a0 * y * dt
+            a_t = a0_t * (time.time() - start) / max(runtime, 1e-8)
+            y = y + (-(a0_t - a_t) * x + c0_t * _matvec(J_mat, x)) * dt_t
+            x = x + a0_t * y * dt_t
             x = torch.clamp(x, -1.0, 1.0)
             y = torch.where((x == 1.0) | (x == -1.0), torch.zeros_like(y), y)
 
             ss = torch.sign(x)
-            energy = -0.5 * (ss @ (J_mat @ ss))
+            energy = -0.5 * (ss @ _matvec(J_mat, ss))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            print(f'BSB: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'BSB: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, ss
 
@@ -292,28 +375,36 @@ class SimCIM:
 
     def solve(self, J_mat, x0, A: float, a0: float, c0: float, dt: float, runtime: float):
         device = self.device
-        x = torch.sign(x0).flatten()
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x0_t = _ensure_device_tensor(x0, device=device, dtype=torch.float32).flatten()
+        A_t = _as_scalar_tensor(A, device=device)
+        a0_t = _as_scalar_tensor(a0, device=device)
+        c0_t = _as_scalar_tensor(c0, device=device)
+        dt_t = _as_scalar_tensor(dt, device=device)
+
+        x = torch.sign(x0_t).flatten()
 
         E_list = []
         T_list = []
         start = time.time()
         t = 0.0
         it = 0
-        sqrt_dt = torch.sqrt(torch.tensor(dt, device=device, dtype=torch.float32))
+        sqrt_dt = torch.sqrt(dt_t)
 
         while t < runtime:
-            a_t = a0 * (time.time() - start) / max(runtime, 1e-8)
-            noise = A * torch.randn_like(x, device=device) * sqrt_dt
-            x = x + (-(a0 - a_t) * x + c0 * (J_mat @ torch.sign(x))) * dt + noise
+            a_t = a0_t * (time.time() - start) / max(runtime, 1e-8)
+            noise = A_t * torch.randn_like(x, device=device) * sqrt_dt
+            spin = torch.sign(x)
+            x = x + (-(a0_t - a_t) * x + c0_t * _matvec(J_mat, spin)) * dt_t + noise
             x = torch.clamp(x, -1.0, 1.0)
             ss = torch.sign(x)
 
-            energy = -0.5 * (ss @ (J_mat @ ss))
+            energy = -0.5 * (ss @ _matvec(J_mat, ss))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            print(f'SimCIM: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SimCIM: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
         return E_list, T_list, ss
 
@@ -329,12 +420,19 @@ class SIS:
 
     def solve(self, J_mat, x0, m: float, k: float, zeta0: float, delta_t: float, runtime: float):
         device = self.device
+        J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32, require_dense=False)
+        x0_t = _ensure_device_tensor(x0, device=device, dtype=torch.float32)
+        m_t = _as_scalar_tensor(m, device=device)
+        k_t = _as_scalar_tensor(k, device=device)
+        zeta0_t = _as_scalar_tensor(zeta0, device=device)
+        delta_t_t = _as_scalar_tensor(delta_t, device=device)
+
         N = J_mat.shape[0]
         q = torch.zeros(N, device=device, dtype=torch.float32)
-        p = 0.0005 * x0
+        p = 0.0005 * x0_t
 
-        current_zeta = 0.8 * zeta0
-        zeta_growth_rate = (10.0 * zeta0 - 0.8 * zeta0) / max(runtime, 1e-8)
+        current_zeta = 0.8 * zeta0_t
+        zeta_growth_rate = (10.0 * zeta0_t - 0.8 * zeta0_t) / max(runtime, 1e-8)
 
         E_list = []
         T_list = []
@@ -344,20 +442,20 @@ class SIS:
 
         sqrt_2 = torch.sqrt(torch.tensor(2.0, device=device, dtype=torch.float32))
         while t < runtime:
-            q = q + delta_t * p / m
-            p = p - delta_t * k * q + 0.5 * current_zeta * delta_t * (J_mat @ q)
+            q = q + delta_t_t * p / m_t
+            p = p - delta_t_t * k_t * q + 0.5 * current_zeta * delta_t_t * _matvec(J_mat, q)
             q = torch.clamp(q, -sqrt_2, sqrt_2)
             p = torch.clamp(p, -2.0, 2.0)
 
             spin = torch.sign(q)
-            energy = -0.5 * (spin @ (J_mat @ spin))
+            energy = -0.5 * (spin @ _matvec(J_mat, spin))
             t = time.time() - start
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            # print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
-            current_zeta = 0.8 * zeta0 + zeta_growth_rate * t
+            current_zeta = 0.8 * zeta0_t + zeta_growth_rate * t
 
         return E_list, T_list, spin
 
@@ -384,7 +482,8 @@ def generate_random_ising(model, n, p=100.0, device=None):
     elif model == 'sk':
         J_mat = torch.randn(n, n, device=device, dtype=torch.float32)
     else:
-        J_mat = 2*torch.triu(torch.randint(0, 2, (n, n), device=device, dtype=torch.float32) * 2 - 1)
+        fc_upper = torch.triu(torch.randint(0, 2, (n, n), device=device, dtype=torch.int32))
+        J_mat = 2 * (fc_upper.float() * 2 - 1)
     
     # Make symmetric
     J_mat = (J_mat + J_mat.T)/2
@@ -418,7 +517,7 @@ def generate_random_ising(model, n, p=100.0, device=None):
     
     return J_mat
 
-def compute_matrix_norms(J_mat):
+def compute_matrix_norms(J_mat, device=None):
     """
     Compute matrix norms needed for DOCH/ADOCH algorithms.
     
@@ -428,32 +527,31 @@ def compute_matrix_norms(J_mat):
     Returns:
         tuple: (matrix_1_norm, matrix_2_norm)
     """
-    n = J_mat.shape[0]
+    if device is None:
+        device = J_mat.device if torch.is_tensor(J_mat) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tensor = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32)
+    n = tensor.shape[0]
     
     # 1-norm (maximum absolute column sum)
-    J_mat_1_norm = torch.max(torch.abs(J_mat).sum(dim=0))
+    J_mat_1_norm = torch.max(torch.abs(tensor).sum(dim=0))
     
     # 2-norm calculation
     if n <= 1000:
         # Exact computation for small matrices
-        j_mat_2_norm = torch.linalg.norm(J_mat, ord=2)
+        j_mat_2_norm = torch.linalg.norm(tensor, ord=2)
     else:
         # Wigner semicircle law approximation for large matrices
         j_mat_2_norm = 2 * math.sqrt(n) * torch.sqrt(
-            torch.sum(J_mat**2)/(n*(n-1)) - (torch.sum(J_mat)/(n*(n-1)))**2
+            torch.sum(tensor**2)/(n*(n-1)) - (torch.sum(tensor)/(n*(n-1)))**2
         )
     
     return J_mat_1_norm, j_mat_2_norm
 
-def compute_j_bar(J_mat: torch.Tensor) -> torch.Tensor:
-    """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
+def compute_j_bar(J_mat: torch.Tensor, device=None) -> torch.Tensor:
 
-    Args:
-        J_mat: Coupling matrix (n x n) with zero diagonal preferred.
-
-    Returns:
-        torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
-    """
+    if device is None:
+        device = J_mat.device if torch.is_tensor(J_mat) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32)
     n = J_mat.shape[0]
     n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
     denom = n_t * (n_t - 1.0)
@@ -553,9 +651,24 @@ def create_symmetric_from_half(upper_half, n):
     
     return result
 
-def generate_sparse_matrix(n=10**6, sparsity=0.99, num_chunks=32, seed=42, max_memory_percent=80):
+def generate_sparse_matrix(n=10**6, sparsity=0.99, num_chunks=32, seed=42, max_memory_percent=80,
+                           as_torch=False, device=None, require_dense=False, dtype=torch.float32):
     """
     Generate a large sparse symmetric matrix with the specified properties using CSR format.
+
+    Args:
+        n: Dimension of the square matrix.
+        sparsity: Desired sparsity level (fraction of zero entries).
+        num_chunks: Number of row chunks to stream during generation.
+        seed: Random seed for reproducibility.
+        max_memory_percent: Max allowed system memory usage before adaptive sparsity kicks in.
+        as_torch: When True, returns a torch sparse tensor on the chosen device.
+        device: Optional torch.device for conversion when as_torch is True.
+        require_dense: If True and as_torch, convert the sparse tensor to dense representation.
+        dtype: Target floating dtype for the torch tensor conversion.
+
+    Returns:
+        scipy.sparse matrix or torch.Tensor depending on `as_torch` flag.
     """
     print(f"Generating {n}x{n} sparse matrix with {sparsity*100:.7f}% sparsity")
     print(f"Using CSR format for memory efficiency")
@@ -631,6 +744,9 @@ def generate_sparse_matrix(n=10**6, sparsity=0.99, num_chunks=32, seed=42, max_m
     print(f"Generation time: {time.time() - start_time:.2f} seconds")
     print(f"Peak memory usage: {peak_memory}%")
     
+    if as_torch:
+        matrix = scipy_sparse_to_torch(matrix, device=device, dtype=dtype, require_dense=require_dense)
+
     return matrix
 
 def save_to_compressed_format(matrix, filename="sparse_matrix.npz"):
@@ -641,6 +757,25 @@ def save_to_compressed_format(matrix, filename="sparse_matrix.npz"):
     save_time = time.time() - start_time
     file_size = os.path.getsize(filename) / (1024**3)
     print(f"File size: {file_size:.2f} GB, Save time: {save_time:.2f} seconds")
+
+
+def scipy_sparse_to_torch(matrix, device=None, dtype=torch.float32, require_dense=False):
+    """Convert a SciPy sparse matrix to a torch tensor on the requested device.
+
+    Args:
+        matrix: SciPy sparse matrix instance.
+        device: Optional torch.device. Defaults to CUDA if available.
+        dtype: Target dtype for the values tensor.
+        require_dense: When True, returns a dense tensor.
+
+    Returns:
+        torch.Tensor: Sparse or dense tensor on the selected device.
+    """
+    if not sp.issparse(matrix):
+        raise TypeError("Expected a SciPy sparse matrix.")
+
+    device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    return _ensure_device_tensor(matrix, device=device, dtype=dtype, require_dense=require_dense)
 
 def build_large_matrix(n, sparsity):
     # System information
@@ -688,7 +823,25 @@ def build_large_matrix(n, sparsity):
     generation_time = time.time() - start_time
     
     # Report memory usage of final matrix
-    matrix_memory = (matrix.data.nbytes + matrix.indices.nbytes + matrix.indptr.nbytes) / (1024**3)
+    if sp.issparse(matrix):
+        matrix_csr = cast(sp.csr_matrix, matrix)
+        matrix_memory = (matrix_csr.data.nbytes + matrix_csr.indices.nbytes + matrix_csr.indptr.nbytes) / (1024**3)
+    elif isinstance(matrix, torch.Tensor):
+        tensor_matrix = matrix
+        is_sparse = tensor_matrix.is_sparse or getattr(tensor_matrix, "is_sparse_csr", False) or getattr(tensor_matrix, "is_sparse_csc", False)
+        if is_sparse:
+            if tensor_matrix.layout == torch.sparse_coo:
+                storage = tensor_matrix.coalesce()
+            else:
+                storage = tensor_matrix.to_sparse().coalesce()
+            matrix_memory = (
+                storage.values().element_size() * storage.values().numel() +
+                storage.indices().element_size() * storage.indices().numel()
+            ) / (1024**3)
+        else:
+            matrix_memory = tensor_matrix.element_size() * tensor_matrix.numel() / (1024**3)
+    else:
+        matrix_memory = float("nan")
     print(f"Matrix memory usage: {matrix_memory:.2f} GB")
     print(f"Total generation time: {generation_time:.2f} seconds")
     
@@ -699,7 +852,7 @@ def build_large_matrix(n, sparsity):
     print("Process completed successfully")
     return matrix
 
-def compute_J_bar(J_mat: torch.Tensor) -> torch.Tensor:
+def compute_J_bar(J_mat: torch.Tensor, device=None) -> torch.Tensor:
     """Compute j_bar = sqrt(sum(J^2)/(n*(n-1))). Useful for BSB/SimCIM parameterization.
 
     Args:
@@ -708,6 +861,9 @@ def compute_J_bar(J_mat: torch.Tensor) -> torch.Tensor:
     Returns:
         torch.Tensor: scalar tensor j_bar on J_mat.device with dtype float32.
     """
+    if device is None:
+        device = J_mat.device if torch.is_tensor(J_mat) else torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    J_mat = _ensure_device_tensor(J_mat, device=device, dtype=torch.float32)
     n = J_mat.shape[0]
     n_t = torch.tensor(float(n), device=J_mat.device, dtype=torch.float32)
     denom = n_t * (n_t - 1.0) * (10 - 1.0)**2
@@ -772,19 +928,19 @@ def calculate_parameters_with_progress(J_mat_coo, n=1000000, memory_efficient=Tr
         print("Using PyTorch-based approach")
         # Convert scipy COO matrix to PyTorch sparse tensor
         print("Converting to PyTorch sparse tensor...")
-        indices = torch.LongTensor(np.vstack((J_mat_coo.row, J_mat_coo.col)))
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        indices = torch.tensor(np.vstack((J_mat_coo.row, J_mat_coo.col)), dtype=torch.long, device=device)
         
         # Process values in chunks to avoid memory issues
         values_chunks = np.array_split(J_mat_coo.data, max(1, len(J_mat_coo.data) // 10000000))
         values = []
-        
+
         for chunk in tqdm(values_chunks, desc="Processing values", unit="chunk"):
-            values.append(torch.tensor(chunk, dtype=torch.float32))
-        
+            values.append(torch.tensor(chunk, dtype=torch.float32, device=device))
+
         values = torch.cat(values)
         
         # Create PyTorch sparse tensor
-        device = "cuda" if torch.cuda.is_available() else "cpu"
         print(f"Using device: {device}")
         J_mat = torch.sparse_coo_tensor(indices, values, size=(n, n), device=device)
         
