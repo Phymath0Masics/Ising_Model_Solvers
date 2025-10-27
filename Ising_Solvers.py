@@ -114,6 +114,26 @@ def _matvec(J_mat, x):
         return torch.sparse.mm(J_mat, x.unsqueeze(-1)).squeeze(-1)
     return J_mat @ x
 
+def _sparse_row_dot(J_mat, row_idx, vec):
+    """
+    Compute dot product of a single sparse row J_mat[row_idx, :] with dense vector vec.
+    Works with torch.sparse_coo_tensor on GPU efficiently by selecting the row's entries.
+    """
+    # If dense/sparse-dense tensor, fallback to full indexing
+    if not (hasattr(J_mat, "is_sparse") and J_mat.is_sparse) and getattr(J_mat, "layout", None) != torch.sparse_coo:
+        return (J_mat[row_idx, :] @ vec)
+
+    Jc = J_mat.coalesce()
+    indices = Jc.indices()          # shape (2, nnz)
+    values = Jc.values()            # shape (nnz,)
+    # boolean mask for entries in the requested row
+    row_mask = indices[0] == row_idx
+    if not row_mask.any():
+        return torch.tensor(0.0, device=vec.device, dtype=vec.dtype)
+    cols = indices[1][row_mask]
+    vals_row = values[row_mask]
+    return torch.dot(vals_row, vec[cols])
+
 class DOCH:
     """
     DOCH (Difference Of Convex Hamiltonian) solver for Ising model.
@@ -329,8 +349,11 @@ class SA:
             v = int(torch.randint(0, N, (1,), device=device, dtype=torch.long).item())
             spin_new = spin.clone()
             spin_new[v] *= -1
+            spin_new = _ensure_device_tensor(spin_new, device=device, dtype=torch.float32).flatten()
 
-            delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
+            row_dot = _sparse_row_dot(J_mat, torch.tensor(v, device=device, dtype=torch.long), spin_new)
+            delta_E = 2.0 * spin_new[v] * row_dot
+
 
             accept_prob = torch.exp(-beta * delta_E)
             if delta_E.item() < 0 or torch.rand(1, device=device, dtype=accept_prob.dtype) < accept_prob:
@@ -994,7 +1017,5 @@ def calculate_parameters_with_progress(J_mat_coo, n=1000000, memory_efficient=Tr
             "J_mat_1_norm": J_mat_1_norm,
             "j_mat_2_norm": j_mat_2_norm
         }
-
-
 
 
