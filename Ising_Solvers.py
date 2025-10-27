@@ -1,4 +1,32 @@
 """
+DOCH, ADOCH Ising Model Solver Algorithm
+========================================
+This file contains the implementation of the Neurosa class for running the optimization algorithm.
+
+Author
+-------
+Debraj BAnerjee, 2025
+
+Here’s a refreshed, polished version of the license notice you shared—cleanly formatted for inclusion in a code header, README, or manuscript:
+
+---
+
+**License**  
+This work is licensed under the 'Creative Commons Attribution–NonCommercial 4.0 International License (CC BY-NC 4.0)'.  
+To view a copy of this license, visit: [http://creativecommons.org/licenses/by-nc/4.0/](http://creativecommons.org/licenses/by-nc/4.0/)
+
+You are free to:
+- Share — copy and redistribute the material in any medium or format  
+- Adapt — remix, transform, and build upon the material  
+
+Under the following terms:
+- Attribution — You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.  
+- NonCommercial — You may not use the material for commercial purposes.  
+
+No additional restrictions — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.  
+"""
+
+"""
 Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
 
 This module implements multiple solvers for the Ising model:
@@ -967,5 +995,6 @@ def calculate_parameters_with_progress(J_mat_coo, n=1000000, memory_efficient=Tr
             "J_mat_1_norm": J_mat_1_norm,
             "j_mat_2_norm": j_mat_2_norm
         }
+
 
 
