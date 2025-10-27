@@ -330,8 +330,7 @@ class SA:
             spin_new = spin.clone()
             spin_new[v] *= -1
 
-            delta_E = -0.5 * spin_new @ _matvec(J_mat, spin_new) - E
-            # delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
+            delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
 
             accept_prob = torch.exp(-beta * delta_E)
             if delta_E.item() < 0 or torch.rand(1, device=device, dtype=accept_prob.dtype) < accept_prob:
@@ -995,6 +994,7 @@ def calculate_parameters_with_progress(J_mat_coo, n=1000000, memory_efficient=Tr
             "J_mat_1_norm": J_mat_1_norm,
             "j_mat_2_norm": j_mat_2_norm
         }
+
 
 
 
