@@ -1,33 +1,5 @@
 """
-DOCH, ADOCH Ising Model Solver Algorithm
-========================================
-This file contains the implementation of the Neurosa class for running the optimization algorithm.
-
-Author
--------
-Debraj BAnerjee, 2025
-
-Here’s a refreshed, polished version of the license notice you shared—cleanly formatted for inclusion in a code header, README, or manuscript:
-
----
-
-**License**  
-This work is licensed under the 'Creative Commons Attribution–NonCommercial 4.0 International License (CC BY-NC 4.0)'.  
-To view a copy of this license, visit: [http://creativecommons.org/licenses/by-nc/4.0/](http://creativecommons.org/licenses/by-nc/4.0/)
-
-You are free to:
-- Share — copy and redistribute the material in any medium or format  
-- Adapt — remix, transform, and build upon the material  
-
-Under the following terms:
-- Attribution — You must give appropriate credit, provide a link to the license, and indicate if changes were made. You may do so in any reasonable manner, but not in any way that suggests the licensor endorses you or your use.  
-- NonCommercial — You may not use the material for commercial purposes.  
-
-No additional restrictions — You may not apply legal terms or technological measures that legally restrict others from doing anything the license permits.  
-"""
-
-"""
-Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
+Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIA
 
 This module implements multiple solvers for the Ising model:
     - DOCH (Difference Of Convex Hamiltonian)
@@ -35,7 +7,7 @@ This module implements multiple solvers for the Ising model:
     - SA (Simulated Annealing)
     - BSB (Ballistic Spin/Bifurcation machine)
     - SimCIM (Simulated Coherent Ising Machine)
-    - SIS (Spring-damping-based Ising Machine)
+    - SIA (Spring Ising Algorithm)
     - Utility functions for generating small and large random Ising matrices and computing norms.
 
 All solvers expose a solve(...) method returning (energies, times, final_spins).
@@ -114,26 +86,6 @@ def _matvec(J_mat, x):
         return torch.sparse.mm(J_mat, x.unsqueeze(-1)).squeeze(-1)
     return J_mat @ x
 
-def _sparse_row_dot(J_mat, row_idx, vec):
-    """
-    Compute dot product of a single sparse row J_mat[row_idx, :] with dense vector vec.
-    Works with torch.sparse_coo_tensor on GPU efficiently by selecting the row's entries.
-    """
-    # If dense/sparse-dense tensor, fallback to full indexing
-    if not (hasattr(J_mat, "is_sparse") and J_mat.is_sparse) and getattr(J_mat, "layout", None) != torch.sparse_coo:
-        return (J_mat[row_idx, :] @ vec)
-
-    Jc = J_mat.coalesce()
-    indices = Jc.indices()          # shape (2, nnz)
-    values = Jc.values()            # shape (nnz,)
-    # boolean mask for entries in the requested row
-    row_mask = indices[0] == row_idx
-    if not row_mask.any():
-        return torch.tensor(0.0, device=vec.device, dtype=vec.dtype)
-    cols = indices[1][row_mask]
-    vals_row = values[row_mask]
-    return torch.dot(vals_row, vec[cols])
-
 class DOCH:
     """
     DOCH (Difference Of Convex Hamiltonian) solver for Ising model.
@@ -182,6 +134,7 @@ class DOCH:
         
         start_time = time.time()
         iterations = 0
+        energy_overhead = 0.0
         
         while time.time() - start_time < runtime:
             # Step 2: DOCH update rule
@@ -189,14 +142,18 @@ class DOCH:
             x = torch.sign(alpha * x + J_x) * (torch.abs((alpha * x + J_x) / beta))**(1/3)
             
             # Step 3: Compute energy and track progress
+            energy_start = time.time()
             spins = torch.sign(x)
             energy = -0.5 * (spins @ _matvec(J_mat, spins))
+            energy_end = time.time()
+            energy_overhead += energy_end - energy_start
+            elapsed = max(energy_end - start_time - energy_overhead, 0.0)
             
             energies.append(energy.item())
-            times.append(time.time() - start_time)
+            times.append(elapsed)
             iterations += 1
             
-            print(f'DOCH: {iterations} iter, {times[-1]:.3f}s, Energy: {energies[-1]:.3f}', end='\r')
+            print(f'DOCH: {iterations} iter, {elapsed:.3f}s, Energy: {energies[-1]:.3f}', end='\r')
         
         return energies, times, torch.sign(x)
 
@@ -262,6 +219,7 @@ class ADOCH:
         
         start_time = time.time()
         k = 0
+        energy_overhead = 0.0
         
         while time.time() - start_time < runtime:
             # Step 2: Compute momentum coefficient
@@ -302,13 +260,16 @@ class ADOCH:
             t_val = t_next.item()
             
             # Compute energy and track progress
+            energy_start = time.time()
             spins = torch.sign(x)
             energy = -0.5 * (spins @ _matvec(J_mat, spins))
-            
-            elapsed_time = time.time() - start_time
+            energy_end = time.time()
+            energy_overhead += energy_end - energy_start
+            elapsed_time = max(energy_end - start_time - energy_overhead, 0.0)
+
             energies.append(energy.item())
             times.append(elapsed_time)
-            
+
             print(f'ADOCH: {k+1} iter, {elapsed_time:.3f}s, Energy: {energy.item():.3f}', end='\r')
             k += 1
         
@@ -349,11 +310,9 @@ class SA:
             v = int(torch.randint(0, N, (1,), device=device, dtype=torch.long).item())
             spin_new = spin.clone()
             spin_new[v] *= -1
-            spin_new = _ensure_device_tensor(spin_new, device=device, dtype=torch.float32).flatten()
 
-            row_dot = _sparse_row_dot(J_mat, torch.tensor(v, device=device, dtype=torch.long), spin_new)
-            delta_E = 2.0 * spin_new[v] * row_dot
-
+            delta_E = -0.5 * spin_new @ _matvec(J_mat, spin_new) - E
+            # delta_E = 2.0 * spin_new[v] * (J_mat[v, :] @ spin_new)
 
             accept_prob = torch.exp(-beta * delta_E)
             if delta_E.item() < 0 or torch.rand(1, device=device, dtype=accept_prob.dtype) < accept_prob:
@@ -396,6 +355,7 @@ class BSB:
         start = time.time()
         t = 0.0
         it = 0
+        energy_overhead = 0.0
         while t < runtime:
             a_t = a0_t * (time.time() - start) / max(runtime, 1e-8)
             y = y + (-(a0_t - a_t) * x + c0_t * _matvec(J_mat, x)) * dt_t
@@ -403,9 +363,12 @@ class BSB:
             x = torch.clamp(x, -1.0, 1.0)
             y = torch.where((x == 1.0) | (x == -1.0), torch.zeros_like(y), y)
 
+            energy_start = time.time()
             ss = torch.sign(x)
             energy = -0.5 * (ss @ _matvec(J_mat, ss))
-            t = time.time() - start
+            energy_end = time.time()
+            energy_overhead += energy_end - energy_start
+            t = max(energy_end - start - energy_overhead, 0.0)
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
@@ -439,6 +402,7 @@ class SimCIM:
         start = time.time()
         t = 0.0
         it = 0
+        energy_overhead = 0.0
         sqrt_dt = torch.sqrt(dt_t)
 
         while t < runtime:
@@ -449,8 +413,11 @@ class SimCIM:
             x = torch.clamp(x, -1.0, 1.0)
             ss = torch.sign(x)
 
+            energy_start = time.time()
             energy = -0.5 * (ss @ _matvec(J_mat, ss))
-            t = time.time() - start
+            energy_end = time.time()
+            energy_overhead += energy_end - energy_start
+            t = max(energy_end - start - energy_overhead, 0.0)
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
@@ -459,7 +426,7 @@ class SimCIM:
         return E_list, T_list, ss
 
 
-class SIS:
+class SIA:
     """Spring-damping-based Ising machine dynamics.
 
     solve(J_mat, x0, m, k, zeta0, delta_t, runtime) -> (energies, times, spins)
@@ -489,6 +456,7 @@ class SIS:
         start = time.time()
         t = 0.0
         it = 0
+        energy_overhead = 0.0
 
         sqrt_2 = torch.sqrt(torch.tensor(2.0, device=device, dtype=torch.float32))
         while t < runtime:
@@ -497,13 +465,16 @@ class SIS:
             q = torch.clamp(q, -sqrt_2, sqrt_2)
             p = torch.clamp(p, -2.0, 2.0)
 
+            energy_start = time.time()
             spin = torch.sign(q)
             energy = -0.5 * (spin @ _matvec(J_mat, spin))
-            t = time.time() - start
+            energy_end = time.time()
+            energy_overhead += energy_end - energy_start
+            t = max(energy_end - start - energy_overhead, 0.0)
             E_list.append(float(energy.item()))
             T_list.append(t)
             it += 1
-            print(f'SIS: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
+            print(f'SIA: {it} iter, {t:.3f}s, Energy: {E_list[-1]:.3f}', end='\r')
 
             current_zeta = 0.8 * zeta0_t + zeta_growth_rate * t
 
