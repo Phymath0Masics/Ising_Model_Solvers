@@ -1,4 +1,4 @@
-# Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
+# Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIA
 
 This project provides multiple algorithms to solve the Ising model by approximating the lowest energy state:
 - DOCH — Difference Of Convex Hamiltonian based Ising Solver (our)
@@ -6,7 +6,7 @@ This project provides multiple algorithms to solve the Ising model by approximat
 - SA — Simulated Annealing
 - BSB — Ballistic Simulated Bifurcation machine
 - SimCIM — Simulated Coherent Ising Machine
-- SIS — Spring-damping-based Ising machine
+- SIA — Spring Ising Algorithm
 - Utility functions for generating small and large random Ising matrices and computing norms.
 
 
@@ -28,7 +28,7 @@ You can run the demo directly from the Jupyter notebook file `demo_run.ipynb`.
 ## 📁 Key Project Files
 ```
 ising-solvers/
-├── Ising_Solvers.py          # Algorithm classes (DOCH, ADOCH, SA, BSB, SimCIM, SIS)
+├── Ising_Solvers.py          # Algorithm classes (DOCH, ADOCH, SA, BSB, SimCIM, SIA)
 ├── demo_run.ipynb            # Interactive Jupyter notebook demo
 ├── environment.yml           # Conda environment specification
 ├── README.md                 # This file
@@ -56,7 +56,7 @@ ising-solvers/
 ## 🔧 How to Use (Basic Example)
 
 ```python
-# Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, SIS
+# Ising Model Solvers: DOCH, ADOCH, SA, BSB, SimCIM, 
 
 This project provides multiple algorithms to solve the Ising model by approximating the lowest energy state:
 - DOCH — Difference Of Convex Hamiltonian based Ising Solver
@@ -64,7 +64,7 @@ This project provides multiple algorithms to solve the Ising model by approximat
 - SA — Simulated Annealing
 - BSB — Ballistic (Simulated) Bifurcation machine
 - SimCIM — Simulated Coherent Ising Machine
-- SIS — Spring-damping-based Ising machine
+- SIA — Spring Ising Algorithm
 - Utilities to generate small/large Ising matrices and compute derived parameters/norms.
 
 
@@ -74,7 +74,7 @@ This project provides multiple algorithms to solve the Ising model by approximat
   - builds a small dense binarized symmetric Ising matrix (Step 2.1)
   - optionally builds a very large sparse matrix (Step 2.2)
   - tunes DOCH and ADOCH (Steps 5.x, 6.x)
-  - tunes and runs SA, BSB, SimCIM, SIS (Steps 7.x)
+  - tunes and runs SA, BSB, SimCIM, SIA (Steps 7.x)
   - compares convergence and plots results (Steps 8–9)
 - `environment.yml`: Conda environment spec
 
@@ -134,12 +134,12 @@ E_ADOCH, T_ADOCH, s_ADOCH = adoch.solve(J_mat, x0, eta=0.1, j_mat_2_norm=j_mat_2
 sa = SA(device)
 bsb = BSB(device)
 cim = SimCIM(device)
-sis = SIS(device)
+SIA = SIA(device)
 c0 = 0.5/(j_bar*np.sqrt(J_mat.shape[0]))
 E_SA, T_SA, s_SA = sa.solve(J_mat, x0, beta0=1.0, runtime=max_runtime)
 E_BSB, T_BSB, s_BSB = bsb.solve(J_mat, x0, a0=1.0, c0=c0, dt=1e-2, runtime=max_runtime)
 E_CIM, T_CIM, s_CIM = cim.solve(J_mat, x0, A=0.1, a0=1.0, c0=c0, dt=1e-2, runtime=max_runtime)
-E_SIS, T_SIS, s_SIS = sis.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=max_runtime)
+E_SIA, T_SIA, s_SIA = SIA.solve(J_mat, x0, m=1.0, k=0.5, zeta0=0.05, delta_t=1e-2, runtime=max_runtime)
 
 # Main convergence plot
 plt.figure()
@@ -151,8 +151,8 @@ if 'T_BSB' in globals():
     plt.plot(T_BSB, E_BSB, label='BSB', color='m', linewidth=1.5, alpha=0.8)
 if 'T_CIM' in globals():
     plt.plot(T_CIM, E_CIM, label='SimCIM', color='orange', linewidth=1.5, alpha=0.8)
-if 'T_SIS' in globals():
-    plt.plot(T_SIS, E_SIS, label='SIS', color='c', linewidth=1.5, alpha=0.8)
+if 'T_SIA' in globals():
+    plt.plot(T_SIA, E_SIA, label='SIA', color='c', linewidth=1.5, alpha=0.8)
 
 plt.xscale('log')
 plt.grid(True, which="both", ls="--", alpha=0.7)
@@ -188,6 +188,7 @@ Ensure the channels include `nvidia` and that your PyTorch build matches the CUD
 
 ## License
 This repository is provided as-is for research and educational use. See header comments for implementation details.
+
 
 
 
