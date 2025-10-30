@@ -134,9 +134,10 @@ class DOCH:
         
         start_time = time.time()
         iterations = 0
+        elapsed_time = 0.0
         energy_overhead = 0.0
-        
-        while time.time() - start_time < runtime:
+
+        while elapsed_time < runtime:
             # Step 2: DOCH update rule
             J_x = _matvec(J_mat, x)
             x = torch.sign(alpha * x + J_x) * (torch.abs((alpha * x + J_x) / beta))**(1/3)
@@ -147,14 +148,14 @@ class DOCH:
             energy = -0.5 * (spins @ _matvec(J_mat, spins))
             energy_end = time.time()
             energy_overhead += energy_end - energy_start
-            elapsed = max(energy_end - start_time - energy_overhead, 0.0)
+            elapsed_time = max(energy_end - start_time - energy_overhead, 0.0)
             
             energies.append(energy.item())
-            times.append(elapsed)
+            times.append(elapsed_time)
             iterations += 1
-            
-            print(f'DOCH: {iterations} iter, {elapsed:.3f}s, Energy: {energies[-1]:.3f}', end='\r')
-        
+
+            print(f'DOCH: {iterations} iter, {elapsed_time:.3f}s, Energy: {energies[-1]:.3f}', end='\r')
+
         return energies, times, torch.sign(x)
 
 
@@ -219,9 +220,10 @@ class ADOCH:
         
         start_time = time.time()
         k = 0
+        elapsed_time = 0.0
         energy_overhead = 0.0
         
-        while time.time() - start_time < runtime:
+        while elapsed_time < runtime:
             # Step 2: Compute momentum coefficient
             t_next = (1 + torch.sqrt(torch.tensor(1 + 4 * t_val**2, 
                                                device=self.device, dtype=torch.float32))) / 2
