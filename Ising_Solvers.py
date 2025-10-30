@@ -761,6 +761,7 @@ def generate_sparse_matrix(n=10**6, sparsity=0.99, num_chunks=32, seed=42, max_m
     
     # Create symmetric matrix
     matrix = create_symmetric_from_half(upper_half, n)
+    matrix = matrix + matrix.transpose()  # Ensure symmetry
     
     # Report statistics
     print(f"Generated matrix with shape {matrix.shape} and {matrix.nnz} non-zero elements")
